@@ -39,16 +39,20 @@ The system should handle four stages:
 
 Sample invoices are provided in the `data/invoices/` directory in various formats (PDF, CSV, JSON, TXT). Use these as inputs for testing. The data intentionally includes a mix of clean entries and problematic ones — identifying and handling issues is part of the challenge.
 
-### Mock Inventory Database
+### Mock Inventory Database (Required Setup)
 
-Create a local SQLite database with the following schema:
+Before running the system, you **must** create a local SQLite database that the validation agent will check invoices against. The sample invoices in `data/invoices/` reference specific items and quantities — your database needs to contain matching inventory records so the validation stage can flag mismatches, out-of-stock items, and unknown products.
+
+Below is a starter schema and seed data that covers the core items referenced across the provided invoices:
 
 ```python
 import sqlite3
 
-conn = sqlite3.connect(':memory:')  # Or save to file
-conn.execute('CREATE TABLE inventory (item TEXT, stock INTEGER)')
-conn.execute("""
+conn = sqlite3.connect('inventory.db')  # Persist to file so all agents can access it
+cursor = conn.cursor()
+
+cursor.execute('CREATE TABLE IF NOT EXISTS inventory (item TEXT PRIMARY KEY, stock INTEGER)')
+cursor.execute("""
     INSERT INTO inventory VALUES
     ('WidgetA', 15),
     ('WidgetB', 10),
@@ -57,6 +61,18 @@ conn.execute("""
 """)
 conn.commit()
 ```
+
+**Why this matters:** The sample invoices are designed to test your validation logic against this database. For example:
+
+| Scenario | Invoice | What should happen |
+|---|---|---|
+| Normal order within stock | INV-1001, INV-1004, INV-1006 | Items found, quantities valid — passes validation |
+| Quantity exceeds stock | INV-1002 (requests 20× GadgetX, only 5 in stock) | Flagged as stock mismatch |
+| Fraudulent / zero-stock item | INV-1003 (references FakeItem, 0 stock) | Flagged as out of stock or suspicious |
+| Item not in database at all | INV-1008 (SuperGizmo, MegaSprocket), INV-1016 (WidgetC) | Flagged as unknown item |
+| Invalid data | INV-1009 (negative quantity) | Flagged as data integrity issue |
+
+You may extend the seed data with additional items or columns (e.g., unit price, category) to support richer validation — the above is the minimum needed to exercise the provided test invoices. If you want your system to also validate pricing or vendor information, consider adding tables for those as well.
 
 ### Mock Payment API
 
