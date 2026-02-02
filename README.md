@@ -104,14 +104,6 @@ python main.py --invoice_path=data/invoices/invoice1.txt
 
 Output should include structured logs and results.
 
-## Deliverables
-
-| File / Folder | Description |
-|---|---|
-| `code/` | All Python source files (`main.py`, `agents.py`, `tools.py`, etc.) |
-| `demo_script.md` | Architecture diagram (ASCII/text), design explanation, run logs for all sample invoices, edge cases handled |
-| `presentation.md` | Bullet-point script for a live demo (5-10 min): what you'll show, key code snippets, business impact |
-
 ## Evaluation Criteria
 
 - **Functionality** — Does the system work end-to-end?
