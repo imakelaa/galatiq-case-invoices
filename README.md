@@ -111,3 +111,4 @@ Output should include structured logs and results.
 - **Agentic Sophistication** — LLM integration, multi-agent flow, tool use, self-correction loops
 - **Shipping Mindset** — Valuable MVP delivered under ambiguity; scope ruthlessly cut where needed
 - **Presentation** — Clear translation of technical decisions to business impact
+- **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
