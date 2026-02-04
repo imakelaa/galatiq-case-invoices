@@ -112,3 +112,4 @@ Output should include structured logs and results.
 - **Shipping Mindset** — Valuable MVP delivered under ambiguity; scope ruthlessly cut where needed
 - **Presentation** — Clear translation of technical decisions to business impact
 - **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
+- **UI/UX** - Users will understand and enjoy using this system.
