@@ -113,3 +113,11 @@ Output should include structured logs and results.
 - **Presentation** — Clear translation of technical decisions to business impact
 - **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
 - **UI/UX** - Users will understand and enjoy using this system.
+
+## Submission
+
+Submit your solution as a link to a **public GitHub repository — GitHub only** (`github.com`). GitLab, Bitbucket, zipped files, and Google Drive links cannot be accepted: our review tooling reads GitHub repositories directly.
+
+- Make the repository **public** so we can access it.
+- A plain repo link (`github.com/you/repo`), a branch link (`/tree/<branch>`), or a pull request (`/pull/<number>`) all work.
+- Include clear setup and run instructions (and any notes on your approach) in the repo.
