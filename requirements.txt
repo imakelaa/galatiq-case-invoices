@@ -1,0 +1,6 @@
+pydantic>=2
+xai-sdk
+python-dotenv
+pdfplumber
+langgraph
+langchain-xai
