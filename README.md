@@ -63,6 +63,21 @@ batch keeps running. Each agent can also be run standalone for debugging — see
   `payments` (the ledger every agent reads/writes), and `vendors` (a view over
   `payments` used for vendor-history and structuring checks).
 
+## Observability dashboard
+
+```bash
+streamlit run observability/app.py
+```
+
+A read-only Streamlit dashboard over `logs/pipeline.log` and `db/inventory.db`:
+outcome KPIs (paid/rejected/needs_review counts and $ amounts), the review queue
+(invoices that didn't get paid, with reasoning), most common validation flags, and
+per-vendor stats (including the structuring/near-$10K pattern check). It only
+reads what the pipeline already writes -- run it alongside `main.py`, not instead
+of it. Query/aggregation logic lives in `observability/data.py`, separate from the
+Streamlit rendering in `observability/app.py`, so it can be reused by a future API
+backend.
+
 ## Tests
 
 ```bash

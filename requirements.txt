@@ -6,3 +6,6 @@ langgraph
 langchain-xai
 python-dateutil
 pytest
+streamlit
+plotly
+pandas
