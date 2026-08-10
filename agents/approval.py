@@ -14,43 +14,16 @@ from langchain_xai import ChatXAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
+from agents import ledger
 from agents.ingestion import InvoiceData
 from agents.validation import ValidationResult
+from prompts import load_prompt
 
 MODEL = "grok-4-fast"
 MAX_REVISIONS = 2
 
-PROPOSE_SYSTEM_PROMPT = """\
-You are a VP-level approver in an accounts payable system, deciding whether
-to approve or reject an invoice for payment. You are given the extracted
-invoice data and its inventory validation result.
-
-Rules to apply:
-  - Invoices over $10,000 require additional scrutiny -- reason explicitly
-    about vendor legitimacy, amount reasonableness, and validation flags
-    before deciding, and lean toward rejection if anything looks off.
-  - Any validation flag (unknown item, insufficient stock, invalid
-    quantity) is a serious concern and should usually result in rejection
-    unless you have a well-justified reason to approve anyway.
-  - Reject anything that looks fraudulent (e.g. suspicious urgency,
-    missing/garbled vendor info, implausible amounts).
-
-If you are given feedback from a previous critique, address it directly and
-revise your reasoning accordingly.
-"""
-
-CRITIQUE_SYSTEM_PROMPT = """\
-You are a skeptical compliance reviewer double-checking a VP's
-approve/reject decision on an invoice before it is finalized. You are given
-the invoice, its validation result, and the proposed decision with
-reasoning. Look for: rules applied incorrectly, validation flags that were
-ignored or hand-waved, weak justification for approving a large or
-suspicious invoice, or reasoning that doesn't actually support the stated
-decision.
-
-If the reasoning is sound, confirm it. Otherwise, send it back for revision
-with specific, actionable feedback on what's wrong.
-"""
+PROPOSE_SYSTEM_PROMPT = load_prompt("approval_propose_system")
+CRITIQUE_SYSTEM_PROMPT = load_prompt("approval_critique_system")
 
 
 class Proposal(BaseModel):
@@ -73,15 +46,29 @@ class ApprovalResult(BaseModel):
 class ApprovalState(TypedDict):
     invoice: InvoiceData
     validation: ValidationResult
+    vendor_history: Optional[ledger.VendorStats]
     proposal: Optional[Proposal]
     critique: Optional[CritiqueVerdict]
     revision_count: int
 
 
+def _vendor_history_block(vendor_history: Optional[ledger.VendorStats]) -> str:
+    if not vendor_history:
+        return "No prior payment history for this vendor."
+    return (
+        f"invoice_count={vendor_history['invoice_count']}, "
+        f"paid_count={vendor_history['paid_count']}, "
+        f"rejected_count={vendor_history['rejected_count']}, "
+        f"avg_amount={vendor_history['avg_amount']:.2f}, "
+        f"near_10k_threshold_count={vendor_history['near_threshold_count']}"
+    )
+
+
 def _context_block(state: ApprovalState) -> str:
     return (
         f"Invoice:\n{state['invoice'].model_dump_json(indent=2)}\n\n"
-        f"Validation result:\n{state['validation'].model_dump_json(indent=2)}"
+        f"Validation result:\n{state['validation'].model_dump_json(indent=2)}\n\n"
+        f"Vendor payment history: {_vendor_history_block(state['vendor_history'])}"
     )
 
 
@@ -145,10 +132,19 @@ def _print_node(node_name: str, partial: dict) -> None:
 
 
 def approve_invoice(invoice: InvoiceData, validation: ValidationResult, verbose: bool = False) -> ApprovalResult:
+    if ledger.is_duplicate(invoice.invoice_number):
+        return ApprovalResult(
+            invoice_number=invoice.invoice_number,
+            decision="reject",
+            reasoning=f"Invoice {invoice.invoice_number} has already been paid -- rejecting to prevent a duplicate payment.",
+            critique_rounds=0,
+        )
+
     app = build_graph()
     initial_state = {
         "invoice": invoice,
         "validation": validation,
+        "vendor_history": ledger.get_vendor_stats(invoice.vendor),
         "proposal": None,
         "critique": None,
         "revision_count": 0,

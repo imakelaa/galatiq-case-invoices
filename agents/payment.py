@@ -11,6 +11,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+from agents import ledger
 from agents.approval import ApprovalResult
 from agents.ingestion import InvoiceData
 
@@ -44,14 +45,24 @@ def _log_rejection(invoice: InvoiceData, approval: ApprovalResult) -> None:
 def process_payment(invoice: InvoiceData, approval: ApprovalResult) -> PaymentResult:
     if approval.decision == "approve":
         response = mock_payment(invoice.vendor, invoice.amount)
-        return PaymentResult(invoice_number=invoice.invoice_number, status="paid", detail=response)
+        result = PaymentResult(invoice_number=invoice.invoice_number, status="paid", detail=response)
+    else:
+        _log_rejection(invoice, approval)
+        result = PaymentResult(
+            invoice_number=invoice.invoice_number,
+            status="rejected",
+            detail={"reasoning": approval.reasoning, "logged_to": str(REJECTIONS_LOG)},
+        )
 
-    _log_rejection(invoice, approval)
-    return PaymentResult(
+    ledger.record_payment(
         invoice_number=invoice.invoice_number,
-        status="rejected",
-        detail={"reasoning": approval.reasoning, "logged_to": str(REJECTIONS_LOG)},
+        source_file=invoice.source_file,
+        vendor=invoice.vendor,
+        amount=invoice.amount,
+        invoice_date=invoice.invoice_date,
+        status=result.status,
     )
+    return result
 
 
 if __name__ == "__main__":
