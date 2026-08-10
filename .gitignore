@@ -5,4 +5,6 @@
 logs
 .pytest_cache
 db/inventory.db
+db/*.db-wal
+db/*.db-shm
 notes.md

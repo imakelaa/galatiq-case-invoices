@@ -7,11 +7,26 @@ runs of the pipeline.
 
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional, TypedDict
 
 DB_PATH = Path(__file__).parent.parent / "db" / "inventory.db"
+
+# Serializes writes to db/inventory.db across worker threads when invoices are
+# processed concurrently (main.py's ThreadPoolExecutor). SQLite's default
+# rollback-journal mode blocks concurrent writers, so without this lock two
+# threads committing at once could raise "database is locked" -- the lock
+# turns that into a short wait instead of a failure. WAL mode (set below)
+# lets reads proceed unblocked either way.
+_WRITE_LOCK = threading.Lock()
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 # A vendor whose invoices repeatedly land just under the $10K approval
 # scrutiny threshold may be "structuring" -- splitting/sizing invoices to
@@ -48,7 +63,7 @@ def is_duplicate(invoice_number: Optional[str]) -> bool:
     """True if this invoice_number has already been paid."""
     if not invoice_number:
         return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = _connect()
     row = conn.execute(
         "SELECT 1 FROM payments WHERE invoice_number_norm = ? AND status = 'paid' LIMIT 1",
         (normalize_invoice_number(invoice_number),),
@@ -61,7 +76,7 @@ def get_paid_record(invoice_number: Optional[str]) -> Optional[dict]:
     """The prior paid submission for this invoice_number, if any (source_file + amount)."""
     if not invoice_number:
         return None
-    conn = sqlite3.connect(DB_PATH)
+    conn = _connect()
     row = conn.execute(
         "SELECT source_file, amount FROM payments WHERE invoice_number_norm = ? AND status = 'paid' LIMIT 1",
         (normalize_invoice_number(invoice_number),),
@@ -88,7 +103,7 @@ def get_vendor_stats(vendor: Optional[str]) -> Optional[VendorStats]:
     """
     if not vendor:
         return None
-    conn = sqlite3.connect(DB_PATH)
+    conn = _connect()
     row = conn.execute(
         "SELECT invoice_count, paid_count, rejected_count, avg_amount, near_threshold_count "
         "FROM vendors WHERE vendor_norm = ?",
@@ -116,13 +131,14 @@ def decrement_stock(items: list[tuple[str, int]]) -> None:
     hide. Items not present in the inventory table are silently skipped --
     validation already flags those as unknown_item.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.executemany(
-        "UPDATE inventory SET stock = stock - ? WHERE item = ?",
-        [(quantity, item) for item, quantity in items],
-    )
-    conn.commit()
-    conn.close()
+    with _WRITE_LOCK:
+        conn = _connect()
+        conn.executemany(
+            "UPDATE inventory SET stock = stock - ? WHERE item = ?",
+            [(quantity, item) for item, quantity in items],
+        )
+        conn.commit()
+        conn.close()
 
 
 def record_payment(
@@ -143,34 +159,35 @@ def record_payment(
     to update here.
     """
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        """
-        INSERT INTO payments (
-            invoice_number, invoice_number_norm, source_file, vendor, vendor_norm,
-            amount, status, invoice_date, processed_at
+    with _WRITE_LOCK:
+        conn = _connect()
+        conn.execute(
+            """
+            INSERT INTO payments (
+                invoice_number, invoice_number_norm, source_file, vendor, vendor_norm,
+                amount, status, invoice_date, processed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(invoice_number, source_file) DO UPDATE SET
+                invoice_number_norm = excluded.invoice_number_norm,
+                vendor = excluded.vendor,
+                vendor_norm = excluded.vendor_norm,
+                amount = excluded.amount,
+                status = excluded.status,
+                invoice_date = excluded.invoice_date,
+                processed_at = excluded.processed_at
+            """,
+            (
+                invoice_number,
+                normalize_invoice_number(invoice_number),
+                source_file,
+                vendor,
+                normalize_vendor(vendor),
+                amount,
+                status,
+                invoice_date,
+                now,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(invoice_number, source_file) DO UPDATE SET
-            invoice_number_norm = excluded.invoice_number_norm,
-            vendor = excluded.vendor,
-            vendor_norm = excluded.vendor_norm,
-            amount = excluded.amount,
-            status = excluded.status,
-            invoice_date = excluded.invoice_date,
-            processed_at = excluded.processed_at
-        """,
-        (
-            invoice_number,
-            normalize_invoice_number(invoice_number),
-            source_file,
-            vendor,
-            normalize_vendor(vendor),
-            amount,
-            status,
-            invoice_date,
-            now,
-        ),
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
