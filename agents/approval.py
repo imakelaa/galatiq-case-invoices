@@ -3,7 +3,7 @@
 Approval agent relies on results of the validation agent.
 If invoice has been validated, agent reasons through an approve/reject decision.
 
-CURRENTLY: agent does 2 revisions maximum before finalizing decision.
+CURRENTLY: agent does 1 revision maximum before finalizing decision.
 """
 
 import sys
@@ -20,7 +20,7 @@ from agents.validation import ValidationResult
 from prompts import load_prompt
 
 MODEL = "grok-4-fast"
-MAX_REVISIONS = 2
+MAX_REVISIONS = 1
 
 PROPOSE_SYSTEM_PROMPT = load_prompt("approval_propose_system")
 CRITIQUE_SYSTEM_PROMPT = load_prompt("approval_critique_system")
@@ -38,7 +38,7 @@ class CritiqueVerdict(BaseModel):
 
 class ApprovalResult(BaseModel):
     invoice_number: Optional[str]
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "reject", "needs_review"]
     reasoning: str
     critique_rounds: int = Field(description="How many propose/critique cycles ran before finalizing")
 
@@ -132,11 +132,19 @@ def _print_node(node_name: str, partial: dict) -> None:
 
 
 def approve_invoice(invoice: InvoiceData, validation: ValidationResult, verbose: bool = False) -> ApprovalResult:
-    if ledger.is_duplicate(invoice.invoice_number):
+    paid_record = ledger.get_paid_record(invoice.invoice_number)
+    if paid_record is not None:
         return ApprovalResult(
             invoice_number=invoice.invoice_number,
-            decision="reject",
-            reasoning=f"Invoice {invoice.invoice_number} has already been paid -- rejecting to prevent a duplicate payment.",
+            decision="needs_review",
+            reasoning=(
+                f"Invoice number {invoice.invoice_number} was already paid via "
+                f"{paid_record['source_file']} (${paid_record['amount']:.2f}). This submission "
+                f"({invoice.source_file}, ${invoice.amount if invoice.amount is not None else 'unknown'}) "
+                "has the same invoice_number but differs in content, so it isn't necessarily a "
+                "duplicate -- it could be a legitimate correction/resubmission. Not auto-deciding "
+                "either way; flagging for manual review."
+            ),
             critique_rounds=0,
         )
 
