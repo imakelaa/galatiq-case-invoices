@@ -21,6 +21,7 @@ from prompts import load_prompt
 
 MODEL = "grok-4-fast"
 MAX_REVISIONS = 1
+VP_APPROVAL_THRESHOLD = 10_000.0
 
 PROPOSE_SYSTEM_PROMPT = load_prompt("approval_propose_system")
 CRITIQUE_SYSTEM_PROMPT = load_prompt("approval_critique_system")
@@ -165,10 +166,23 @@ def approve_invoice(invoice: InvoiceData, validation: ValidationResult, verbose:
             if verbose:
                 _print_node(node_name, partial)
 
+    proposal = final_state["proposal"]
+    decision = proposal.decision
+    reasoning = proposal.reasoning
+
+    if decision == "approve" and invoice.amount is not None and invoice.amount >= VP_APPROVAL_THRESHOLD:
+        decision = "needs_review"
+        reasoning = (
+            f"Invoice amount ${invoice.amount:.2f} is at or above the ${VP_APPROVAL_THRESHOLD:,.0f} "
+            "VP-approval threshold, which requires human sign-off -- this cannot be auto-approved "
+            f"regardless of model reasoning. Model's proposed decision was 'approve' with reasoning: "
+            f"{reasoning}"
+        )
+
     return ApprovalResult(
         invoice_number=invoice.invoice_number,
-        decision=final_state["proposal"].decision,
-        reasoning=final_state["proposal"].reasoning,
+        decision=decision,
+        reasoning=reasoning,
         critique_rounds=final_state["revision_count"],
     )
 

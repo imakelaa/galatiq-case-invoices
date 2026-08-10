@@ -37,7 +37,7 @@ def run_pipeline(invoice_path: Path, verbose: bool = False) -> None:
     print(json.dumps(approval.model_dump(), indent=2))
 
     print(f"\n[payment] processing {invoice.invoice_number}...")
-    payment = process_payment(invoice, approval)
+    payment = process_payment(invoice, validation, approval)
     print(json.dumps(payment.model_dump(), indent=2))
 
 

@@ -102,6 +102,13 @@ class ValidationResult(BaseModel):
             "date), otherwise one calculated from invoice_date + payment_terms, otherwise null"
         )
     )
+    invoice_date_iso: Optional[str] = Field(
+        description=(
+            "invoice_date normalized to ISO YYYY-MM-DD (the same parsing already done to compute "
+            "effective_due_date), for downstream storage -- null if invoice_date was missing or "
+            "unparseable/fraudulent"
+        )
+    )
 
 
 class InventoryFlag(BaseModel):
@@ -152,13 +159,19 @@ def _implied_due_date(
     return None
 
 
-def _finalize(invoice_number: Optional[str], flags: list[Flag], effective_due_date: Optional[date]) -> ValidationResult:
+def _finalize(
+    invoice_number: Optional[str],
+    flags: list[Flag],
+    effective_due_date: Optional[date],
+    invoice_date_iso: Optional[str],
+) -> ValidationResult:
     return ValidationResult(
         invoice_number=invoice_number,
         passed=not any(f.blocking for f in flags),
         flags=flags,
         summary=" ".join(f.message for f in flags) if flags else "Invoice passes validation with no issues.",
         effective_due_date=effective_due_date.isoformat() if effective_due_date else None,
+        invoice_date_iso=invoice_date_iso,
     )
 
 
@@ -170,6 +183,9 @@ def _build_validation_result(agent_output: AgentOutput) -> ValidationResult:
 
     invoice_date = _parse_iso(agent_output.invoice_date_iso)
     due_date = _parse_iso(agent_output.due_date_iso)
+    # Captured once, before invoice_date may get cleared below in the fraudulent branch --
+    # this is the normalized value to hand downstream regardless of what happens to `invoice_date`.
+    invoice_date_iso = invoice_date.isoformat() if invoice_date else None
 
     if agent_output.invoice_date_issue == "missing" or (
         invoice_date is None and agent_output.invoice_date_issue != "fraudulent"
@@ -183,7 +199,7 @@ def _build_validation_result(agent_output: AgentOutput) -> ValidationResult:
                 blocking=True,
             )
         )
-        return _finalize(agent_output.invoice_number, flags, None)
+        return _finalize(agent_output.invoice_number, flags, None, invoice_date_iso)
 
     if agent_output.invoice_date_issue == "fraudulent":
         flags.append(
@@ -219,7 +235,7 @@ def _build_validation_result(agent_output: AgentOutput) -> ValidationResult:
                 blocking=True,
             )
         )
-        return _finalize(agent_output.invoice_number, flags, None)
+        return _finalize(agent_output.invoice_number, flags, None, invoice_date_iso)
 
     if due_date is not None:
         if implied_due_date is not None and implied_due_date != due_date:
@@ -235,10 +251,10 @@ def _build_validation_result(agent_output: AgentOutput) -> ValidationResult:
                     blocking=False,
                 )
             )
-        return _finalize(agent_output.invoice_number, flags, due_date)
+        return _finalize(agent_output.invoice_number, flags, due_date, invoice_date_iso)
 
     if implied_due_date is not None:
-        return _finalize(agent_output.invoice_number, flags, implied_due_date)
+        return _finalize(agent_output.invoice_number, flags, implied_due_date, invoice_date_iso)
 
     if invoice_date is not None:
         fallback = invoice_date + timedelta(days=30)
@@ -254,9 +270,9 @@ def _build_validation_result(agent_output: AgentOutput) -> ValidationResult:
                 blocking=False,
             )
         )
-        return _finalize(agent_output.invoice_number, flags, fallback)
+        return _finalize(agent_output.invoice_number, flags, fallback, invoice_date_iso)
 
-    return _finalize(agent_output.invoice_number, flags, None)
+    return _finalize(agent_output.invoice_number, flags, None, invoice_date_iso)
 
 
 def build_agent():
@@ -281,17 +297,37 @@ def _print_step(step: dict) -> None:
         print(f"[validation]   tool_call -> {call['name']}({call['args']})", file=sys.stderr)
 
 
+MAX_VALIDATION_ATTEMPTS = 2  # initial attempt + 1 retry if the model ends a turn without the structured call
+
+
 def validate_invoice(invoice: InvoiceData, verbose: bool = False) -> ValidationResult:
     agent = build_agent()
     input_state = {"messages": [{"role": "user", "content": invoice.model_dump_json(indent=2)}]}
 
-    final_state = None
-    for step in agent.stream(input_state, stream_mode="values"):
-        final_state = step
-        if verbose:
-            _print_step(step)
+    agent_output: Optional[AgentOutput] = None
+    for attempt in range(MAX_VALIDATION_ATTEMPTS):
+        final_state = None
+        for step in agent.stream(input_state, stream_mode="values"):
+            final_state = step
+            if verbose:
+                _print_step(step)
 
-    agent_output: AgentOutput = final_state["structured_response"]
+        agent_output = final_state["structured_response"]
+        if agent_output is not None:
+            break
+        if verbose:
+            print(
+                "[validation] model ended its turn without the structured output call; retrying",
+                file=sys.stderr,
+            )
+
+    if agent_output is None:
+        raise RuntimeError(
+            f"Validation agent for {invoice.invoice_number!r} ended its turn without producing "
+            f"a structured response after {MAX_VALIDATION_ATTEMPTS} attempt(s) -- the model likely "
+            "replied with plain text instead of calling the final schema."
+        )
+
     return _build_validation_result(agent_output)
 
 
