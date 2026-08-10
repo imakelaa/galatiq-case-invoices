@@ -3,7 +3,7 @@
 Approval agent relies on results of the validation agent.
 If invoice has been validated, agent reasons through an approve/reject decision.
 
-CURRENTLY: agent does 2 revisions maximum before finalizing decision.
+CURRENTLY: agent does 1 revision maximum before finalizing decision.
 """
 
 import sys
@@ -14,43 +14,17 @@ from langchain_xai import ChatXAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
+from agents import ledger
 from agents.ingestion import InvoiceData
 from agents.validation import ValidationResult
+from prompts import load_prompt
 
 MODEL = "grok-4-fast"
-MAX_REVISIONS = 2
+MAX_REVISIONS = 1
+VP_APPROVAL_THRESHOLD = 10_000.0
 
-PROPOSE_SYSTEM_PROMPT = """\
-You are a VP-level approver in an accounts payable system, deciding whether
-to approve or reject an invoice for payment. You are given the extracted
-invoice data and its inventory validation result.
-
-Rules to apply:
-  - Invoices over $10,000 require additional scrutiny -- reason explicitly
-    about vendor legitimacy, amount reasonableness, and validation flags
-    before deciding, and lean toward rejection if anything looks off.
-  - Any validation flag (unknown item, insufficient stock, invalid
-    quantity) is a serious concern and should usually result in rejection
-    unless you have a well-justified reason to approve anyway.
-  - Reject anything that looks fraudulent (e.g. suspicious urgency,
-    missing/garbled vendor info, implausible amounts).
-
-If you are given feedback from a previous critique, address it directly and
-revise your reasoning accordingly.
-"""
-
-CRITIQUE_SYSTEM_PROMPT = """\
-You are a skeptical compliance reviewer double-checking a VP's
-approve/reject decision on an invoice before it is finalized. You are given
-the invoice, its validation result, and the proposed decision with
-reasoning. Look for: rules applied incorrectly, validation flags that were
-ignored or hand-waved, weak justification for approving a large or
-suspicious invoice, or reasoning that doesn't actually support the stated
-decision.
-
-If the reasoning is sound, confirm it. Otherwise, send it back for revision
-with specific, actionable feedback on what's wrong.
-"""
+PROPOSE_SYSTEM_PROMPT = load_prompt("approval_propose_system")
+CRITIQUE_SYSTEM_PROMPT = load_prompt("approval_critique_system")
 
 
 class Proposal(BaseModel):
@@ -65,7 +39,7 @@ class CritiqueVerdict(BaseModel):
 
 class ApprovalResult(BaseModel):
     invoice_number: Optional[str]
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "reject", "needs_review"]
     reasoning: str
     critique_rounds: int = Field(description="How many propose/critique cycles ran before finalizing")
 
@@ -73,15 +47,29 @@ class ApprovalResult(BaseModel):
 class ApprovalState(TypedDict):
     invoice: InvoiceData
     validation: ValidationResult
+    vendor_history: Optional[ledger.VendorStats]
     proposal: Optional[Proposal]
     critique: Optional[CritiqueVerdict]
     revision_count: int
 
 
+def _vendor_history_block(vendor_history: Optional[ledger.VendorStats]) -> str:
+    if not vendor_history:
+        return "No prior payment history for this vendor."
+    return (
+        f"invoice_count={vendor_history['invoice_count']}, "
+        f"paid_count={vendor_history['paid_count']}, "
+        f"rejected_count={vendor_history['rejected_count']}, "
+        f"avg_amount={vendor_history['avg_amount']:.2f}, "
+        f"near_10k_threshold_count={vendor_history['near_threshold_count']}"
+    )
+
+
 def _context_block(state: ApprovalState) -> str:
     return (
         f"Invoice:\n{state['invoice'].model_dump_json(indent=2)}\n\n"
-        f"Validation result:\n{state['validation'].model_dump_json(indent=2)}"
+        f"Validation result:\n{state['validation'].model_dump_json(indent=2)}\n\n"
+        f"Vendor payment history: {_vendor_history_block(state['vendor_history'])}"
     )
 
 
@@ -145,10 +133,27 @@ def _print_node(node_name: str, partial: dict) -> None:
 
 
 def approve_invoice(invoice: InvoiceData, validation: ValidationResult, verbose: bool = False) -> ApprovalResult:
+    paid_record = ledger.get_paid_record(invoice.invoice_number)
+    if paid_record is not None:
+        return ApprovalResult(
+            invoice_number=invoice.invoice_number,
+            decision="needs_review",
+            reasoning=(
+                f"Invoice number {invoice.invoice_number} was already paid via "
+                f"{paid_record['source_file']} (${paid_record['amount']:.2f}). This submission "
+                f"({invoice.source_file}, ${invoice.amount if invoice.amount is not None else 'unknown'}) "
+                "has the same invoice_number but differs in content, so it isn't necessarily a "
+                "duplicate -- it could be a legitimate correction/resubmission. Not auto-deciding "
+                "either way; flagging for manual review."
+            ),
+            critique_rounds=0,
+        )
+
     app = build_graph()
     initial_state = {
         "invoice": invoice,
         "validation": validation,
+        "vendor_history": ledger.get_vendor_stats(invoice.vendor),
         "proposal": None,
         "critique": None,
         "revision_count": 0,
@@ -161,10 +166,23 @@ def approve_invoice(invoice: InvoiceData, validation: ValidationResult, verbose:
             if verbose:
                 _print_node(node_name, partial)
 
+    proposal = final_state["proposal"]
+    decision = proposal.decision
+    reasoning = proposal.reasoning
+
+    if decision == "approve" and invoice.amount is not None and invoice.amount >= VP_APPROVAL_THRESHOLD:
+        decision = "needs_review"
+        reasoning = (
+            f"Invoice amount ${invoice.amount:.2f} is at or above the ${VP_APPROVAL_THRESHOLD:,.0f} "
+            "VP-approval threshold, which requires human sign-off -- this cannot be auto-approved "
+            f"regardless of model reasoning. Model's proposed decision was 'approve' with reasoning: "
+            f"{reasoning}"
+        )
+
     return ApprovalResult(
         invoice_number=invoice.invoice_number,
-        decision=final_state["proposal"].decision,
-        reasoning=final_state["proposal"].reasoning,
+        decision=decision,
+        reasoning=reasoning,
         critique_rounds=final_state["revision_count"],
     )
 

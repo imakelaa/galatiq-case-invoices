@@ -3,3 +3,6 @@
 */__pycache__
 .claude
 logs
+.pytest_cache
+db/inventory.db
+notes.md

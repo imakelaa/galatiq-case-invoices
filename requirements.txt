@@ -4,3 +4,5 @@ python-dotenv
 pdfplumber
 langgraph
 langchain-xai
+python-dateutil
+pytest

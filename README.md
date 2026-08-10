@@ -1,119 +1,74 @@
-# Galatiq Case: Invoice Processing Automation
+# Invoice Processing Automation
 
-## Background
+A four-stage multi-agent pipeline (ingestion → validation → approval → payment) that
+processes messy/fraudulent invoices end-to-end, built for the Galatiq case study
+(see `problem_statement/README.md` for the original brief).
 
-Acme Corp is a PE-backed manufacturing firm losing **$2M/year** on manual invoice processing. Invoices arrive via email as PDFs in messy formats with frequent errors. Staff manually extract data, validate against a legacy inventory database (inconsistent), obtain VP approval (via email chains), and process payment (via a banking API).
-
-**Current pain points:**
-- 30% error rate
-- 5-day processing delays
-- Frustrated stakeholders
-
-## Objective
-
-Build a **multi-agent system** that automates the end-to-end invoice processing workflow. The system must run as a working prototype — not just designs or slides.
-
-## Workflow
-
-The system should handle four stages:
-
-1. **Ingestion** — Extract structured data from invoice documents (PDFs, text files). Fields include: Vendor, Amount, Items (with quantities), and Due Date. Expect unstructured text, typos, missing data, and potentially fraudulent entries.
-
-2. **Validation** — Verify extracted data against a mock inventory database (SQLite). Flag mismatches such as quantity exceeding available stock or items not found in inventory.
-
-3. **Approval** — Simulate VP-level review with rule-based decision-making (e.g., invoices over $10K require additional scrutiny). The agent should reason through approval/rejection with a reflection or critique loop.
-
-4. **Payment** — If approved, call a mock payment function. If rejected, log the rejection with reasoning.
-
-## Technical Requirements
-
-- **LLM Integration**: Use xAI's Grok as the core reasoning engine (via the xAI API at https://grok.x.ai). Other models are acceptable if you don't have an API key.
-- **Multi-Agent Orchestration**: Use a framework such as LangGraph, CrewAI, AutoGen, or a custom solution.
-- **Agent Capabilities**: Function calling / tool use, structured outputs, and self-correction loops.
-- **Runtime**: Assume no internet for external APIs — simulate everything locally.
-- **Tech Stack**: Python (preferred), with libraries like `langchain`, `crewai`, `autogen`, `pdfplumber`, `PyMuPDF`, etc. Run locally — no cloud deployment.
-
-## Provided Resources
-
-### Mock Invoice Data
-
-Sample invoices are provided in the `data/invoices/` directory in various formats (PDF, CSV, JSON, TXT). Use these as inputs for testing. The data intentionally includes a mix of clean entries and problematic ones — identifying and handling issues is part of the challenge.
-
-### Mock Inventory Database (Required Setup)
-
-Before running the system, you **must** create a local SQLite database that the validation agent will check invoices against. The sample invoices in `data/invoices/` reference specific items and quantities — your database needs to contain matching inventory records so the validation stage can flag mismatches, out-of-stock items, and unknown products.
-
-Below is a starter schema and seed data that covers the core items referenced across the provided invoices:
-
-```python
-import sqlite3
-
-conn = sqlite3.connect('inventory.db')  # Persist to file so all agents can access it
-cursor = conn.cursor()
-
-cursor.execute('CREATE TABLE IF NOT EXISTS inventory (item TEXT PRIMARY KEY, stock INTEGER)')
-cursor.execute("""
-    INSERT INTO inventory VALUES
-    ('WidgetA', 15),
-    ('WidgetB', 10),
-    ('GadgetX', 5),
-    ('FakeItem', 0)
-""")
-conn.commit()
-```
-
-**Why this matters:** The sample invoices are designed to test your validation logic against this database. For example:
-
-| Scenario | Invoice | What should happen |
-|---|---|---|
-| Normal order within stock | INV-1001, INV-1004, INV-1006 | Items found, quantities valid — passes validation |
-| Quantity exceeds stock | INV-1002 (requests 20× GadgetX, only 5 in stock) | Flagged as stock mismatch |
-| Fraudulent / zero-stock item | INV-1003 (references FakeItem, 0 stock) | Flagged as out of stock or suspicious |
-| Item not in database at all | INV-1008 (SuperGizmo, MegaSprocket), INV-1016 (WidgetC) | Flagged as unknown item |
-| Invalid data | INV-1009 (negative quantity) | Flagged as data integrity issue |
-
-You may extend the seed data with additional items or columns (e.g., unit price, category) to support richer validation — the above is the minimum needed to exercise the provided test invoices. If you want your system to also validate pricing or vendor information, consider adding tables for those as well.
-
-### Mock Payment API
-
-```python
-def mock_payment(vendor, amount):
-    print(f"Paid {amount} to {vendor}")
-    return {"status": "success"}
-```
-
-### Grok API Setup
-
-```python
-from xai import Grok
-
-client = Grok(api_key="your_key")
-response = client.chat.completions.create(
-    model="grok-3",
-    messages=[{"role": "user", "content": "Reason about this..."}]
-)
-```
-
-## Running the System
-
-The system should be executable from the command line:
+## Setup
 
 ```bash
-python main.py --invoice_path=data/invoices/invoice1.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env   # fill in XAI_API_KEY (https://console.x.ai)
+
+python3 db/setup_inventory.py   # creates db/inventory.db (inventory + payments ledger)
 ```
 
-Output should include structured logs and results.
+## Usage
 
-## Evaluation Criteria
+```bash
+# single invoice
+python3 main.py --invoice_path=data/invoices/invoice_1001.txt
 
-- **Functionality** — Does the system work end-to-end?
-- **Code Quality** — Clean, testable, well-structured code with error handling and observability
-- **Agentic Sophistication** — LLM integration, multi-agent flow, tool use, self-correction loops
-- **Shipping Mindset** — Valuable MVP delivered under ambiguity; scope ruthlessly cut where needed
-- **Presentation** — Clear translation of technical decisions to business impact
-- **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
-- **UI/UX** - Users will understand and enjoy using this system.
+# every supported file in a directory (.txt, .json, .csv, .xml, .pdf)
+python3 main.py --invoice_dir=data/invoices
 
-## Submission
+# stream node-by-node agent reasoning (LangGraph steps, tool calls) to stderr
+python3 main.py --invoice_path=data/invoices/invoice_1001.txt --verbose
+```
 
-Submit your solution as a link to a public GitHub repository — GitHub only (github.com).
+In directory mode, a failure on one invoice is logged to stderr and the rest of the
+batch keeps running. Each agent can also be run standalone for debugging — see the
+`if __name__ == "__main__"` block at the bottom of each `agents/*.py` file.
+
+## The agents
+
+- **Ingestion** (`agents/ingestion.py`) — Reads a raw invoice file (plain text, or PDF
+  via `pdfplumber`) and calls Grok with a structured-output schema to extract
+  `InvoiceData`. Retries once if the response fails schema validation.
+- **Validation** (`agents/validation.py`) — A LangGraph ReAct agent that looks up each
+  line item against `db/inventory.db` via a `query_inventory` tool. Date math (due-date
+  calculation, mismatch/fraud flag construction) is done deterministically in Python,
+  not by the LLM.
+- **Approval** (`agents/approval.py`) — A propose → critique LangGraph loop (max 1
+  revision) simulates VP review, using vendor payment history from the ledger. Invoices
+  at/above the $10K threshold are force-routed to `needs_review` regardless of what the
+  model proposes, and an invoice number that's already been paid is short-circuited to
+  `needs_review` rather than silently re-approved.
+- **Payment** (`agents/payment.py`) — On `approve`, calls the mock payment API and
+  decrements `db/inventory.db` stock for the shipped items. On `reject`/`needs_review`,
+  logs the reasoning instead. Every outcome is recorded in the `payments` ledger table.
+
+## Observing results
+
+- **Console output** — `main.py` prints each stage's structured JSON result
+  (`InvoiceData` → `ValidationResult` → `ApprovalResult` → `PaymentResult`) as it runs.
+- **`logs/review.log`** — every invoice that did *not* get paid (`rejected` or
+  `needs_review`), with the reasoning and a timestamp — the queue a human would work.
+- **`logs/pipeline.log`** — the full audit trail: one JSON entry per invoice with what
+  every stage saw and decided, including paid invoices.
+- **`db/inventory.db`** — the source of truth: `inventory` (current stock),
+  `payments` (the ledger every agent reads/writes), and `vendors` (a view over
+  `payments` used for vendor-history and structuring checks).
+
+## Tests
+
+```bash
+pytest
+```
+
+Covers the deterministic logic in each agent (date/flag math, ledger upserts and
+normalization, log formatting, payment routing) with a temp SQLite DB per test — no
+LLM calls, so it runs without an API key. See `tests/`.

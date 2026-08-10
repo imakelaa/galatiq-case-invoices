@@ -16,18 +16,13 @@ from pydantic import BaseModel, Field, ValidationError
 from xai_sdk import Client
 from xai_sdk.chat import system, user
 
+from prompts import load_prompt
+
 load_dotenv()
 
 MODEL = os.getenv("XAI_MODEL", "grok-4-fast")
 
-SYSTEM_PROMPT = """\
-You are an invoice data extraction agent for an accounts payable system.
-You will be given the raw text of a single invoice, which may be poorly
-formatted, contain typos or OCR-style errors, be missing fields, or be
-fraudulent. Extract exactly what is written — do not invent or correct
-values. If a field is missing or unreadable, leave it null rather than
-guessing.
-"""
+SYSTEM_PROMPT = load_prompt("ingestion_system")
 
 
 class LineItem(BaseModel):
@@ -39,7 +34,13 @@ class InvoiceData(BaseModel):
     invoice_number: Optional[str] = Field(description="Invoice identifier, e.g. INV-1001")
     vendor: Optional[str] = Field(description="Vendor / sender name")
     amount: Optional[float] = Field(description="Total amount due, as stated on the invoice")
-    due_date: Optional[str] = Field(description="Due date exactly as written; null if missing/unparseable")
+    invoice_date: Optional[str] = Field(description="Date the invoice was issued, exactly as written; null if missing")
+    due_date: Optional[str] = Field(
+        description="Due date exactly as written, only if explicitly stated; null if missing/unparseable"
+    )
+    payment_terms: Optional[str] = Field(
+        description="Payment terms exactly as written, e.g. 'Net 30'; null if missing"
+    )
     items: list[LineItem] = Field(default_factory=list, description="Line items with quantities")
     source_file: str = Field(description="Filename this data was extracted from")
 
@@ -84,11 +85,21 @@ def extract_invoice(path: Path) -> InvoiceData:
     ) from last_error
 
 
+SUPPORTED_EXTENSIONS = {".txt", ".json", ".csv", ".xml", ".pdf"}
+
+
+def discover_invoice_files(dir_path: Path) -> list[Path]:
+    return sorted(
+        p for p in dir_path.iterdir()
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+    )
+
+
 if __name__ == "__main__":
     import argparse
     import json
 
-    parser = argparse.ArgumentParser(description="Extract structured data from an invoice file")
+    parser = argparse.ArgumentParser(description="Extract structured data from a single invoice file")
     parser.add_argument("--invoice_path", required=True, type=Path)
     args = parser.parse_args()
 
