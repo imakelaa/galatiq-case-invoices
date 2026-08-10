@@ -47,13 +47,15 @@ def _validation(**overrides) -> ValidationResult:
     return ValidationResult(**defaults)
 
 
-def test_log_entry_writes_indented_readable_json(tmp_path):
+def test_log_entry_writes_indented_readable_json(tmp_path, monkeypatch):
     log_path = tmp_path / "out.log"
-    payment._log_entry(log_path, _invoice(), _approval("reject"))
+    monkeypatch.setattr(payment, "REVIEW_LOG", log_path)
+    payment._log_entry(_invoice(), _approval("reject"), status="rejected")
 
     content = log_path.read_text()
     assert "\n" in content.strip()  # spread across multiple lines, not one blob
     entry = json.loads(content)
+    assert entry["status"] == "rejected"
     assert entry["invoice_number"] == "INV-1"
     assert entry["vendor"] == "Acme"
     assert entry["reasoning"] == "because"
@@ -68,7 +70,7 @@ def test_process_payment_approve_pays_and_records_ledger(test_db):
 def test_process_payment_reject_logs_and_records_ledger(test_db):
     result = payment.process_payment(_invoice(), _validation(), _approval("reject"))
     assert result.status == "rejected"
-    assert payment.REJECTIONS_LOG.exists()
+    assert payment.REVIEW_LOG.exists()
     assert ledger.is_duplicate("INV-1") is False  # rejected, not paid
     assert ledger.get_vendor_stats("Acme")["rejected_count"] == 1
 
@@ -76,8 +78,19 @@ def test_process_payment_reject_logs_and_records_ledger(test_db):
 def test_process_payment_needs_review_does_not_touch_ledger(test_db):
     result = payment.process_payment(_invoice(), _validation(), _approval("needs_review"))
     assert result.status == "needs_review"
-    assert payment.MANUAL_REVIEW_LOG.exists()
+    assert payment.REVIEW_LOG.exists()
     assert ledger.get_vendor_stats("Acme") is None
+
+
+def test_review_log_shared_by_rejected_and_needs_review(test_db):
+    payment.process_payment(_invoice(invoice_number="INV-1"), _validation(), _approval("reject"))
+    payment.process_payment(
+        _invoice(invoice_number="INV-2"), _validation(invoice_number="INV-2"),
+        _approval("needs_review", invoice_number="INV-2"),
+    )
+    content = payment.REVIEW_LOG.read_text()
+    assert '"status": "rejected"' in content
+    assert '"status": "needs_review"' in content
 
 
 @pytest.mark.parametrize("decision,status", [("approve", "paid"), ("reject", "rejected"), ("needs_review", "needs_review")])
