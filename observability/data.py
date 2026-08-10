@@ -16,6 +16,7 @@ import pandas as pd
 from agents import ledger
 
 PIPELINE_LOG = Path(__file__).parent.parent / "logs" / "pipeline.log"
+TELEMETRY_LOG = Path(__file__).parent.parent / "logs" / "telemetry.log"
 
 
 def _read_json_stream(path: Path) -> list[dict]:
@@ -167,3 +168,100 @@ def inventory_df() -> pd.DataFrame:
     df = pd.read_sql_query("SELECT item, stock FROM inventory ORDER BY item", conn)
     conn.close()
     return df
+
+
+# ---- Developer/ops telemetry (logs/telemetry.log) -----------------------
+#
+# Separate from pipeline_df() above: that's business-facing (what each
+# invoice decided), this is engineering-facing (how the pipeline performed
+# -- per-stage latency, failures, retries). Same underlying log-parsing
+# trick (_read_json_stream) since telemetry.py writes in the same
+# back-to-back-pretty-JSON format as pipeline.log/review.log.
+
+def load_telemetry_entries() -> list[dict]:
+    return _read_json_stream(TELEMETRY_LOG)
+
+
+def run_telemetry_df() -> pd.DataFrame:
+    """One row per invoice run: per-stage duration columns + outcome/failure info."""
+    entries = [e for e in load_telemetry_entries() if e.get("kind") == "run"]
+    if not entries:
+        return pd.DataFrame(
+            columns=["timestamp", "source_file", "invoice_number", "status",
+                     "total_duration", "failed_stage", "error",
+                     "ingestion", "validation", "approval", "payment"]
+        )
+    rows = []
+    for e in entries:
+        durations = e.get("stage_durations", {})
+        rows.append(
+            {
+                "timestamp": e.get("timestamp"),
+                "source_file": e.get("source_file"),
+                "invoice_number": e.get("invoice_number"),
+                "status": e.get("status"),
+                "total_duration": e.get("total_duration"),
+                "failed_stage": e.get("failed_stage"),
+                "error": e.get("error"),
+                "ingestion": durations.get("ingestion"),
+                "validation": durations.get("validation"),
+                "approval": durations.get("approval"),
+                "payment": durations.get("payment"),
+            }
+        )
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+
+def retry_df() -> pd.DataFrame:
+    """One row per retry event (e.g. ingestion's schema-validation retry)."""
+    entries = [e for e in load_telemetry_entries() if e.get("kind") == "retry"]
+    if not entries:
+        return pd.DataFrame(columns=["timestamp", "source_file", "stage", "attempt"])
+    df = pd.DataFrame(entries)[["timestamp", "source_file", "stage", "attempt"]]
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df.sort_values("timestamp", ascending=False).reset_index(drop=True)
+
+
+def stage_latency_stats(run_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """avg/p50/p95/max latency per stage, in seconds, over successful runs."""
+    run_df = run_telemetry_df() if run_df is None else run_df
+    stages = ["ingestion", "validation", "approval", "payment"]
+    if run_df.empty:
+        return pd.DataFrame(columns=["stage", "avg", "p50", "p95", "max", "count"])
+    rows = []
+    for stage in stages:
+        series = run_df[stage].dropna()
+        if series.empty:
+            continue
+        rows.append(
+            {
+                "stage": stage,
+                "avg": series.mean(),
+                "p50": series.median(),
+                "p95": series.quantile(0.95),
+                "max": series.max(),
+                "count": int(series.count()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def dev_kpis(run_df: Optional[pd.DataFrame] = None) -> dict:
+    """Headline reliability/performance numbers for the dev dashboard's top tiles."""
+    run_df = run_telemetry_df() if run_df is None else run_df
+    if run_df.empty:
+        return {"total_runs": 0, "success": 0, "failed": 0, "error_rate_pct": 0.0,
+                "avg_total_duration": 0.0, "p95_total_duration": 0.0}
+    total = len(run_df)
+    failed = int((run_df["status"] == "failed").sum())
+    success = total - failed
+    return {
+        "total_runs": total,
+        "success": success,
+        "failed": failed,
+        "error_rate_pct": failed / total * 100 if total else 0.0,
+        "avg_total_duration": float(run_df["total_duration"].mean()),
+        "p95_total_duration": float(run_df["total_duration"].quantile(0.95)),
+    }

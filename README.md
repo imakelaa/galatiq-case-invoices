@@ -62,11 +62,15 @@ batch keeps running. Each agent can also be run standalone for debugging — see
 - **`db/inventory.db`** — the source of truth: `inventory` (current stock),
   `payments` (the ledger every agent reads/writes), and `vendors` (a view over
   `payments` used for vendor-history and structuring checks).
+- **`logs/telemetry.log`** — per-stage latency, failures (with which stage broke and
+  why), and retries (e.g. ingestion's schema-validation retry). Written from
+  `main.py` (stage timing/failures) and `agents/ingestion.py` (retry events) --
+  only populated by runs through `main.py`, not standalone `agents/*.py` runs.
 
-## Observability dashboard
+## Observability -- User Dashboard
 
 ```bash
-streamlit run observability/app.py
+streamlit run observability/user_observe_app.py
 ```
 
 A read-only Streamlit dashboard over `logs/pipeline.log` and `db/inventory.db`:
@@ -75,8 +79,20 @@ outcome KPIs (paid/rejected/needs_review counts and $ amounts), the review queue
 per-vendor stats (including the structuring/near-$10K pattern check). It only
 reads what the pipeline already writes -- run it alongside `main.py`, not instead
 of it. Query/aggregation logic lives in `observability/data.py`, separate from the
-Streamlit rendering in `observability/app.py`, so it can be reused by a future API
+Streamlit rendering in `observability/user_observe_app.py`, so it can be reused by a future API
 backend.
+
+## Observability -- Developer Dashboard
+
+```bash
+streamlit run observability/dev_observe_app.py
+```
+
+A read-only dashboard over `logs/telemetry.log`: per-stage latency (avg/p95),
+run outcomes (success/failure), latency over time, a failures table (which
+stage broke and the exception), and a retries table. This is engineering-facing
+signal (how the pipeline performed) rather than app.py's business-facing signal
+(what each invoice decided) -- run it alongside `main.py` the same way.
 
 ## Tests
 

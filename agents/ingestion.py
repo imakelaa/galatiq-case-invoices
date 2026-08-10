@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from xai_sdk import Client
 from xai_sdk.chat import system, user
 
+from agents import telemetry
 from prompts import load_prompt
 
 load_dotenv()
@@ -68,6 +69,8 @@ def extract_invoice(path: Path) -> InvoiceData:
         try:
             _, parsed = chat.parse(InvoiceData)
             parsed.source_file = path.name
+            if attempt > 0:
+                telemetry.log_retry(source_file=path.name, stage="ingestion", attempt=attempt + 1)
             return parsed
         except ValidationError as exc:
             last_error = exc

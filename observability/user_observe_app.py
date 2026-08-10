@@ -2,7 +2,7 @@
 renders KPIs, the review queue, flag patterns, and vendor stats.
 
 CURRENTLY: Read-only -- run alongside the CLI pipeline, never in place of it:
-    streamlit run observability/app.py
+    streamlit run observability/user_observe_app.py
 """
 
 import sys
@@ -27,8 +27,8 @@ STATUS_COLORS = {
 STATUS_ICONS = {"paid": "✓", "needs_review": "⚠", "rejected": "✕"}
 SEQUENTIAL_BLUE = "#2a78d6"
 
-st.set_page_config(page_title="Invoice Pipeline Observability", layout="wide")
-st.title("Invoice Pipeline Observability")
+st.set_page_config(page_title="User Dashboard", layout="wide")
+st.title("User Dashboard")
 
 auto_refresh = st.sidebar.checkbox("Auto-refresh", value=False)
 refresh_seconds = (
